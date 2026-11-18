@@ -31,5 +31,6 @@ def add_records(db,user,id,data):
         try: values=validate_record(r.values)
         except ValueError as e:raise HTTPException(422,str(e))
         if db.scalar(select(Record.id).where(Record.source_id==id,Record.reference==r.reference)):raise HTTPException(409,'样本编号已存在：'+r.reference)
-        validated.append(Record(source_id=id,reference=r.reference,values=values))
+        instrument=(r.instrument_key or '').strip() or None
+        validated.append(Record(source_id=id,reference=r.reference,instrument_key=instrument,values=values))
     db.add_all(validated);log(db,user,'records.added',id,str(len(validated)));db.commit();return {'added':len(validated)}

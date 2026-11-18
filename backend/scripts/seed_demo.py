@@ -6,11 +6,13 @@ from src.models.user import User
 from src.models.source import Source
 from src.models.record import Record
 from src.models.run import Run
+from src.models.calibration import CalibrationInstrument,CalibrationPair,CalibrationState
 from src.models import note,audit
 from src.utils.security import hash_password
 from src.utils.serialization import now
 from src.services.runs import queue
 from src.services.domain_validation import validate_record
+from src.services.calibration_solver import as_fingerprint
 
 def seed_values(kind,index,batch,rng):
     if kind=='gaussian':
@@ -46,14 +48,51 @@ def seed():
             for index in range(CONFIG['seed_count']):
                 reference=key+f'-{index+1:04}'
                 vals=seed_values(CONFIG['algorithm'],index,batch,rng)
+                instrument=f'{CONFIG["code"]}-INS-{batch+1:02}-{index%6+1:02}'
                 if not db.scalar(select(Record.id).where(Record.source_id==source.id,Record.reference==reference)):
-                    db.add(Record(source_id=source.id,reference=reference,values=validate_record(vals)))
+                    db.add(Record(source_id=source.id,reference=reference,instrument_key=instrument,
+                                  values=validate_record(vals)))
             db.flush()
             if batch==0 and not db.scalar(select(Run.id).where(Run.name=='首轮种子研究')):
                 records=[{'id':r.id,'source_id':r.source_id,'reference':r.reference,'values':r.values} for r in db.scalars(select(Record).where(Record.source_id==source.id).order_by(Record.id))]
                 run=Run(source_id=source.id,name='首轮种子研究',state='queued',parameters=CONFIG['default_parameters'],snapshot={'source':{'id':source.id,'name':source.name,'filename':source.filename},'records':records},created_at=now());db.add(run);db.flush();queued.append(run.id)
         db.commit();print(json.dumps(counts(db),ensure_ascii=False))
+    seed_calibration()
     for id in queued:
         try:queue.rpush('analysis:queue',id)
         except Exception:logging.exception('seed queue unavailable')
-if __name__=='__main__':seed()
+
+
+def seed_calibration():
+    """Demo network: three anchored six-instrument chains plus one isolated pair.
+
+    The isolated pair deliberately has no trusted anchor so the calibration page
+    can show that such a component is quarantined instead of given an offset.
+    """
+    pairs=[]
+    for batch in (1,2,3):
+        keys=[f'{CONFIG["code"]}-INS-{batch:02}-{i:02}' for i in range(1,7)]
+        for i in range(len(keys)-1):
+            pairs.append((keys[i],keys[i+1],i==0,
+                          round(.4-.15*i,2),round(1.2-.4*i,2),round(2.0-.3*i,2),1.0,f'Q-{batch:02}-{i+1:02}'))
+    pairs.append(('HL-INS-09-01','HL-INS-09-02',False,2.0,3.0,4.0,1.0,'Q-09'))
+    with Session() as db:
+        if db.scalar(select(CalibrationPair.id)):return
+        st=db.scalar(select(CalibrationState).where(CalibrationState.id==1)) or CalibrationState(id=1,graph_version=0)
+        db.add(st)
+        anchor_keys={left for left,_r,is_anchor,*_ in pairs if is_anchor}
+        all_keys=set()
+        for left,right,*_ in pairs:all_keys.update((left,right))
+        for key in sorted(all_keys):
+            if not db.scalar(select(CalibrationInstrument.id).where(CalibrationInstrument.key==key)):
+                db.add(CalibrationInstrument(key=key,name=key,is_anchor=key in anchor_keys,
+                                             created_at=now()))
+        for left,right,_anchor,t,h,p,w,session in pairs:
+            if not db.scalar(select(CalibrationPair.id).where(
+                    CalibrationPair.observation_key==as_fingerprint(['obs',left,right,'SITE-A',session]))):
+                db.add(CalibrationPair(observation_key=as_fingerprint(['obs',left,right,'SITE-A',session]),
+                                       left_key=left,right_key=right,site='SITE-A',session_key=session,
+                                       observed_at=now(),temperature=t,humidity=h,particles=p,
+                                       weight=w,revision=0,updated_at=now()))
+        db.flush();st.graph_version=(st.graph_version or 0)+1;db.commit()
+        print(json.dumps({'calibration_pairs':len(pairs)},ensure_ascii=False))

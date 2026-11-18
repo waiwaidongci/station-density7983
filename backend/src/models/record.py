@@ -7,4 +7,5 @@ class Record(Base):
     id=Column(Integer,primary_key=True)
     source_id=Column(Integer,ForeignKey(CONFIG['source_table']+'.id'),nullable=False)
     reference=Column(String(120),nullable=False)
+    instrument_key=Column(String(120),nullable=True,index=True)
     values=Column(JSON,nullable=False)
